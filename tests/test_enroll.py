@@ -163,6 +163,34 @@ class EnrollmentTests(unittest.TestCase):
         self.assertFalse(server.created)
         self.assertTrue(all(method == "GET" for method, _, _ in server.calls))
 
+    def test_selected_course_secret_is_granted_before_configuration_check(self):
+        server = ProvisionServer()
+        server.visibility = "selected"
+        with patch.object(core, "api", side_effect=server), patch.object(
+                core, "check_configuration", side_effect=server.check):
+            core.provision("Student-123", "2073", enroll.COURSES["2073"])
+        grants = [(index, method, path) for index, (method, path, _) in enumerate(server.calls)
+                  if "/actions/secrets/" in path and method == "PUT"]
+        self.assertEqual(len(grants), 1)
+        index, _, path = grants[0]
+        self.assertEqual(path, "orgs/LearningOS/actions/secrets/OSCAMP_2026A_RCORE_TOKEN/repositories/123")
+        self.assertLess(index, server.check_position)
+        self.assertTrue(server.published)
+
+    def test_failed_secret_grant_does_not_check_publish_or_invite(self):
+        server = ProvisionServer()
+        server.visibility = "selected"
+        def denied(method, path, data=None, **options):
+            if "/actions/secrets/" in path and method == "PUT":
+                raise core.GitHubError("Secret grant denied", 403)
+            return server(method, path, data, **options)
+        with patch.object(core, "api", side_effect=denied), patch.object(core, "check_configuration") as check:
+            with self.assertRaisesRegex(core.GitHubError, "Secret grant denied"):
+                core.provision("Student-123", "2073", enroll.COURSES["2073"])
+        check.assert_not_called()
+        self.assertFalse(server.published)
+        self.assertFalse(any("/collaborators/" in path for _, path, _ in server.calls))
+
     def test_lost_creation_and_rename_responses_recover_same_repository(self):
         server = ProvisionServer()
         server.lose_create = server.lose_rename = True
