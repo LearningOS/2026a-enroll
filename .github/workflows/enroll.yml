@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   enroll:
-    if: github.repository == '2026f-autotest/enroll' && github.ref == 'refs/heads/main'
+    if: github.repository == 'LearningOS/2026a-enroll' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

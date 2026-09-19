@@ -1,11 +1,11 @@
-# 2026f OpenCamp 作业仓库领取
+# 2026a OpenCamp 作业仓库领取
 
 | 课程 | 领取作业仓库 | 提交分支 |
 | --- | --- | --- |
-| 导学阶段-Rust 语言基础 | [点击领取](https://github.com/2026f-autotest/enroll/issues/new?template=rustlings.yml) | `main` |
-| 基础阶段 - Rust 进阶 & OS 入门 | [点击领取](https://github.com/2026f-autotest/enroll/issues/new?template=base.yml) | `main` |
-| 专业阶段 - rCore-Tutorial | [点击领取](https://github.com/2026f-autotest/enroll/issues/new?template=rcore.yml) | `ch3`、`ch4`、`ch5`、`ch6`、`ch8` |
-| 项目先导阶段 - 组件化操作系统 | [点击领取](https://github.com/2026f-autotest/enroll/issues/new?template=arceos.yml) | `main` |
+| 导学阶段-Rust 语言基础 | [点击领取](https://github.com/LearningOS/2026a-enroll/issues/new?template=rustlings.yml) | `main` |
+| 基础阶段 - Rust 进阶 & OS 入门 | [点击领取](https://github.com/LearningOS/2026a-enroll/issues/new?template=base.yml) | `main` |
+| 专业阶段 - rCore-Tutorial | [点击领取](https://github.com/LearningOS/2026a-enroll/issues/new?template=rcore.yml) | `ch3`、`ch4`、`ch5`、`ch6`、`ch8` |
+| 项目先导阶段 - 组件化操作系统 | [点击领取](https://github.com/LearningOS/2026a-enroll/issues/new?template=arceos.yml) | `main` |
 
 ## 使用流程
 

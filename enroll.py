@@ -10,8 +10,8 @@ from github_api import api, redact
 from provision import ConfigurationError, provision
 
 ROOT = Path(__file__).resolve().parent
-ORGANIZATION = "2026f-autotest"
-HUB = ORGANIZATION + "/enroll"
+ORGANIZATION = "LearningOS"
+HUB = ORGANIZATION + "/2026a-enroll"
 COURSES = json.loads((ROOT / "courses.json").read_text())
 
 

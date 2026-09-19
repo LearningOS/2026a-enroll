@@ -14,9 +14,9 @@ def application(body=None):
 class ProvisionServer:
     """Deterministic API fault injection; real GitHub runs are recorded separately."""
     def __init__(self):
-        self.final = "2026f-autotest/2026f-rcore-Student-123"
-        self.preparing = "2026f-autotest/preparing-2026f-rcore-Student-123"
-        self.template = "2026f-autotest/2026f-rcore"
+        self.final = "LearningOS/2026a-rcore-Student-123"
+        self.preparing = "LearningOS/preparing-2026a-rcore-Student-123"
+        self.template = "LearningOS/2026a-rcore"
         self.created = self.published = False
         self.lose_create = self.lose_rename = self.lose_variable = False
         self.variable = None
@@ -32,7 +32,7 @@ class ProvisionServer:
         self.calls.append((method, path, data))
         if path == "users/Student-123":
             return {"type": "User", "login": "Student-123"}
-        if path == "repos/2026f-autotest/2026f-rcore":
+        if path == "repos/LearningOS/2026a-rcore":
             return {"is_template": True, "private": False}
         if "/actions/secrets/" in path:
             return {"visibility": self.visibility}
