@@ -15,6 +15,10 @@ HUB = ORGANIZATION + "/2026a-enroll"
 COURSES = json.loads((ROOT / "courses.json").read_text())
 
 
+class EnrollmentClosed(ValueError):
+    """A recognized course is not accepting new assignment repositories."""
+
+
 def parse_request(issue):
     if issue.get("pull_request") is not None:
         raise ValueError("Pull requests are not enrollment applications.")
@@ -32,6 +36,8 @@ def parse_request(issue):
     for course_id, course in COURSES.items():
         # Keep earlier applications retryable after switching the form to course names.
         if choice in (course["title"], f"{course_id} · {course['title']}"):
+            if course.get("enrollment_open") is not True:
+                raise EnrollmentClosed(f"{course['title']}暂未开放作业仓库领取，请等待开课通知。")
             return login, course_id, course
     raise ValueError("课程不在本期领取列表中，请重新选择课程。")
 
@@ -78,6 +84,14 @@ def process_application(issue, run_url):
         )
         api("POST", f"repos/{HUB}/issues/{number}/comments", {"body": body}, issue=True)
         api("PATCH", f"repos/{HUB}/issues/{number}", {"state": "closed"}, issue=True)
+    except EnrollmentClosed as error:
+        body = (str(error) + "\n\n目前仅开放[导学阶段-Rust 语言基础作业领取]"
+                f"(https://github.com/{HUB}/issues/new?template=rustlings.yml)。")
+        api("POST", f"repos/{HUB}/issues/{number}/comments", {"body": body}, issue=True)
+        api("PATCH", f"repos/{HUB}/issues/{number}",
+            {"state": "closed", "state_reason": "not_planned"}, issue=True)
+        print(str(error), flush=True)
+        return
     except (ValueError, RuntimeError, OSError, KeyError) as error:
         print(redact(str(error)), flush=True)
         message = f"本次领取未完成，请维护者查看[运行日志]({run_url})后重试该申请。"

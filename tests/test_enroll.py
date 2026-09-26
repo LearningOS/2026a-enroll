@@ -8,7 +8,7 @@ import provision as core
 
 def application(body=None):
     return {"number": 1, "user": {"login": "Student-123", "type": "User"},
-            "body": body or "### 课程\n\n2073 · 专业阶段 - rCore-Tutorial\n"}
+            "body": body or "### 课程\n\n导学阶段-Rust 语言基础\n"}
 
 
 class ProvisionServer:
@@ -102,14 +102,36 @@ class EnrollmentTests(unittest.TestCase):
             for choice in (course["title"], f"{course_id} · {course['title']}"):
                 with self.subTest(choice=choice):
                     issue = application(f"### 课程\n\n{choice}\n")
+                    if course.get("enrollment_open") is not True:
+                        with self.assertRaises(enroll.EnrollmentClosed):
+                            enroll.parse_request(issue)
+                        continue
                     login, selected, config = enroll.parse_request(issue)
                     self.assertEqual((login, selected), ("Student-123", course_id))
                     self.assertEqual(config, course)
 
     def test_student_identity_only_comes_from_issue_author(self):
-        issue = application("### 课程\n\n2073 · 专业阶段 - rCore-Tutorial\n"
+        issue = application("### 课程\n\n导学阶段-Rust 语言基础\n"
                             "\n### GitHub 登录名\n\nMaintainer\n$(touch unwanted)\n")
         self.assertEqual(enroll.parse_request(issue)[0], "Student-123")
+
+    def test_closed_courses_never_provision_even_with_legacy_form_bodies(self):
+        for course_id, course in enroll.COURSES.items():
+            if course.get("enrollment_open") is True:
+                continue
+            for choice in (course['title'], f"{course_id} · {course['title']}"):
+                with self.subTest(choice=choice), patch.object(enroll, 'provision') as provision, patch.object(enroll, 'api') as api:
+                    enroll.process_application(application(f"### 课程\n\n{choice}\n"), 'https://github.com/run')
+                    provision.assert_not_called()
+                    self.assertIn('暂未开放', api.call_args_list[0].args[2]['body'])
+                    self.assertEqual(api.call_args_list[-1].args[2], {'state': 'closed', 'state_reason': 'not_planned'})
+
+    def test_unconfigured_enrollment_is_closed_by_default(self):
+        course = dict(enroll.COURSES['2084'])
+        course.pop('enrollment_open')
+        with patch.dict(enroll.COURSES, {'2084': course}):
+            with self.assertRaises(enroll.EnrollmentClosed):
+                enroll.parse_request(application())
 
     def test_unknown_or_ambiguous_course_rejected(self):
         for body in ["### 课程\n\n9999 · Other", "hello",

@@ -3,28 +3,48 @@
     "title": "导学阶段-Rust 语言基础",
     "template": "2026a-rustling",
     "secret": "OSCAMP_2026A_RUSTLINGS_TOKEN",
-    "branches": ["main"],
-    "stage": 2
+    "branches": [
+      "main"
+    ],
+    "stage": 2,
+    "enrollment_open": true
   },
   "2074": {
     "title": "基础阶段 - Rust 进阶 & OS 入门",
     "template": "2026a-oscamp-base",
     "secret": "OSCAMP_2026A_BASE_TOKEN",
-    "branches": ["main"],
-    "stage": 4
+    "branches": [
+      "main"
+    ],
+    "stage": 4,
+    "enrollment_open": false
   },
   "2073": {
     "title": "专业阶段 - rCore-Tutorial",
     "template": "2026a-rcore",
     "secret": "OSCAMP_2026A_RCORE_TOKEN",
-    "branches": ["main", "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7", "ch8"],
-    "stage": 5
+    "branches": [
+      "main",
+      "ch1",
+      "ch2",
+      "ch3",
+      "ch4",
+      "ch5",
+      "ch6",
+      "ch7",
+      "ch8"
+    ],
+    "stage": 5,
+    "enrollment_open": false
   },
   "2078": {
     "title": "项目先导阶段 - 组件化操作系统",
     "template": "2026a-arceos",
     "secret": "OSCAMP_2026A_ARCEOS_TOKEN",
-    "branches": ["main"],
-    "stage": 6
+    "branches": [
+      "main"
+    ],
+    "stage": 6,
+    "enrollment_open": false
   }
 }

@@ -13,8 +13,5 @@ body:
       label: 课程
       options:
         - "导学阶段-Rust 语言基础"
-        - "基础阶段 - Rust 进阶 & OS 入门"
-        - "专业阶段 - rCore-Tutorial"
-        - "项目先导阶段 - 组件化操作系统"
     validations:
       required: true
