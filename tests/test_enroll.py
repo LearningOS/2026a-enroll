@@ -117,10 +117,10 @@ class EnrollmentTests(unittest.TestCase):
 
     def test_closed_courses_never_provision_even_with_legacy_form_bodies(self):
         for course_id, course in enroll.COURSES.items():
-            if course.get("enrollment_open") is True:
-                continue
+            closed_course = dict(course, enrollment_open=False)
             for choice in (course['title'], f"{course_id} · {course['title']}"):
-                with self.subTest(choice=choice), patch.object(enroll, 'provision') as provision, patch.object(enroll, 'api') as api:
+                with self.subTest(choice=choice), patch.dict(enroll.COURSES, {course_id: closed_course}), \
+                        patch.object(enroll, 'provision') as provision, patch.object(enroll, 'api') as api:
                     enroll.process_application(application(f"### 课程\n\n{choice}\n"), 'https://github.com/run')
                     provision.assert_not_called()
                     self.assertIn('暂未开放', api.call_args_list[0].args[2]['body'])

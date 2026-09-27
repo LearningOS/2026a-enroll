@@ -17,7 +17,7 @@
       "main"
     ],
     "stage": 4,
-    "enrollment_open": false
+    "enrollment_open": true
   },
   "2073": {
     "title": "专业阶段 - rCore-Tutorial",
@@ -35,7 +35,7 @@
       "ch8"
     ],
     "stage": 5,
-    "enrollment_open": false
+    "enrollment_open": true
   },
   "2078": {
     "title": "项目先导阶段 - 组件化操作系统",
@@ -45,6 +45,6 @@
       "main"
     ],
     "stage": 6,
-    "enrollment_open": false
+    "enrollment_open": true
   }
 }
