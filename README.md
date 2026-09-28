@@ -1,9 +1,10 @@
 # 2026a OpenCamp 作业仓库领取
 
-本期四个课程均已开放作业仓库领取。其他课程请使用课程方提供的领取链接。
+以下两个课程已开放作业仓库领取。其他课程请使用课程方提供的领取链接。
 
 | 课程 | 领取作业仓库 | 提交分支 |
 | --- | --- | --- |
+| 导学阶段-Rust 语言基础（Rustlings） | [点击领取](https://github.com/LearningOS/2026a-enroll/issues/new?template=rustlings.yml) | `main` |
 | 基础阶段 - Rust 进阶 & OS 入门 | [点击领取](https://github.com/LearningOS/2026a-enroll/issues/new?template=base.yml) | `main` |
 
 ## 使用流程
