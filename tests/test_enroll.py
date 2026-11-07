@@ -1,4 +1,5 @@
 import os
+import json
 import unittest
 from unittest.mock import patch
 
@@ -21,6 +22,8 @@ class ProvisionServer:
         self.lose_create = self.lose_rename = self.lose_variable = False
         self.variable = None
         self.can_write = False
+        self.owner_id = None
+        self.description = ""
         self.invites = []
         self.invitee = {"id": 456, "login": "Student-123", "type": "User"}
         self.visibility = "all"
@@ -43,6 +46,7 @@ class ProvisionServer:
             return [{"name": branch} for branch in enroll.COURSES["2073"]["branches"]]
         if path.endswith("/generate"):
             self.created = True
+            self.description = data["description"]
             if self.lose_create:
                 raise core.GitHubError("Created but response lost; retry got HTTP 422", 422)
             return {"id": 123}
@@ -62,8 +66,13 @@ class ProvisionServer:
             return {"id": 123}
         if path in ["repos/" + self.final, "repos/" + self.preparing]:
             exists = self.published if path.endswith(self.final) else self.created
-            return {"id": 123, "full_name": path[6:], "template_repository": {"full_name": self.template},
+            return {"id": 123, "description": self.description, "full_name": path[6:], "template_repository": {"full_name": self.template},
                     "private": False} if exists else None
+        if path == "repositories/123/properties/values":
+            if method == "PATCH":
+                self.owner_id = data["properties"][0]["value"]
+                return
+            return [{"property_name": core.OWNER_PROPERTY, "value": self.owner_id}]
         if path == "repositories/123/collaborators/Student-123/permission":
             return {"user": self.invitee, "permission": "write" if self.can_write else "read"}
         if path.startswith("repositories/123/invitations?"):
@@ -88,6 +97,84 @@ class ProvisionServer:
 
 
 class EnrollmentTests(unittest.TestCase):
+    def setUp(self):
+        token = patch.dict(os.environ, {"GH_TOKEN": "test-enrollment-credential"})
+        token.start()
+        self.addCleanup(token.stop)
+
+    def test_recycled_login_cannot_claim_bound_or_unproven_legacy_repository(self):
+        for owner in ("123456", None):
+            server = ProvisionServer()
+            server.created = server.published = True
+            server.variable = {"value": server.invitee["login"]}
+            server.owner_id = owner
+            def request(method, path, data=None, **options):
+                if path.startswith("search/issues?"):
+                    return {"items": []}
+                return server(method, path, data, **options)
+            with self.subTest(owner=owner), patch.object(core, "api", side_effect=request):
+                with self.assertRaisesRegex(ValueError, "GitHub.*ID"):
+                    server.enroll()
+            self.assertTrue(all(method == "GET" for method, _, _ in server.calls))
+
+    def test_legacy_receipt_requires_original_author_bot_and_matching_run(self):
+        repo = {"id": 123, "full_name": "LearningOS/2026a-rcore-Student-123"}
+        student = {"id": 456, "login": "Student-123"}
+        body = "[本次配置检查已通过](https://github.com/" + repo["full_name"] + "/actions/runs/77)"
+        for author, bot, rid, expected in ((456, 41898282, 123, True), (789, 41898282, 123, False),
+                                           (456, 555, 123, False), (456, 41898282, 321, False)):
+            def request(method, path, **options):
+                if path.endswith("/issues/4"):
+                    return {"number": 4, "user": {"id": author}}
+                if "/comments?" in path:
+                    return [{"user": {"id": bot, "login": "github-actions[bot]"}, "body": body}]
+                if path == "repositories/123/actions/runs/77":
+                    return {"repository": {"id": rid}, "event": "workflow_dispatch",
+                            "path": ".github/workflows/check-config.yml", "conclusion": "success"}
+                self.assertTrue(path.startswith("search/issues?"))
+                return {"items": []}
+            with self.subTest(author=author, bot=bot, rid=rid), patch.object(core, "api", side_effect=request):
+                self.assertEqual(core.legacy_receipt(repo, student, 4), expected)
+
+    def test_formal_repository_missing_required_branch_is_not_certified(self):
+        server = ProvisionServer()
+        server.created = server.published = True
+        server.owner_id = "456"
+        def request(method, path, data=None, **options):
+            if path.startswith("repos/" + server.final + "/branches?"):
+                return [{"name": "main"}]
+            return server(method, path, data, **options)
+        with patch.object(core, "api", side_effect=request), self.assertRaisesRegex(ValueError, "missing.*ch8"):
+            server.enroll()
+        self.assertTrue(all(method == "GET" for method, _, _ in server.calls))
+
+    def test_withdrawal_during_configuration_stops_invitation_and_publication(self):
+        server = ProvisionServer()
+        def withdrawn():
+            raise enroll.Withdrawn()
+        with patch.object(core, "api", side_effect=server), patch.object(core, "check_configuration",
+                side_effect=server.check), self.assertRaises(enroll.Withdrawn):
+            core.provision("Student-123", "2073", enroll.COURSES["2073"], 456, 1, withdrawn)
+        self.assertFalse(server.published)
+        self.assertFalse(server.invites)
+
+    def test_queued_automatic_request_honors_withdrawal_manual_retry_can_recover(self):
+        snapshot = dict(application(), state="open")
+        current = dict(snapshot, state="closed")
+        event = json.dumps({"action": "opened", "issue": snapshot})
+        for kind in ("issues", "workflow_dispatch"):
+            env = {"GITHUB_REPOSITORY": enroll.HUB, "GITHUB_EVENT_PATH": "unused", "GITHUB_RUN_ID": "1",
+                   "GITHUB_EVENT_NAME": kind, "RETRY_ISSUE_NUMBER": "1"}
+            with self.subTest(kind=kind), patch.dict(os.environ, env), patch.object(enroll.Path, "read_text",
+                    return_value=event), patch.object(enroll, "api", return_value=current) as api, patch.object(
+                    enroll, "process_application") as process:
+                enroll.main()
+                api.assert_called_once_with("GET", "repos/" + enroll.HUB + "/issues/1", issue=True)
+                if kind == "issues":
+                    process.assert_not_called()
+                else:
+                    self.assertEqual(process.call_args.args[0], current)
+                    self.assertIsNone(process.call_args.args[2])
     def test_rename_respects_long_rate_limit_without_outer_early_retry(self):
         server = ProvisionServer()
         server.created = True
@@ -249,11 +336,13 @@ class EnrollmentTests(unittest.TestCase):
         self.assertEqual(url, "https://github.com/" + server.final)
         self.assertTrue(server.published)
         self.assertEqual(sum(path.endswith("/generate") for _, path, _ in server.calls), 1)
-        self.assertEqual(sum(method == "PATCH" for method, _, _ in server.calls), 1)
+        self.assertEqual(sum(method == "PATCH" and path == "repos/" + server.preparing
+                             for method, path, _ in server.calls), 1)
 
     def test_existing_formal_repository_is_not_renamed(self):
         server = ProvisionServer()
         server.created = server.published = True
+        server.owner_id = "456"
         with patch.object(core, "api", side_effect=server), patch.object(
                 core, "check_configuration", side_effect=server.check):
             server.enroll()
@@ -316,7 +405,7 @@ class EnrollmentTests(unittest.TestCase):
             with self.assertRaises(core.ConfigurationError):
                 enroll.process_application(application(), "https://github.com/run")
         payloads = [call.args[2] for call in api.call_args_list]
-        self.assertIn({"state": "open"}, payloads)
+        self.assertNotIn({"state": "open"}, payloads)
         self.assertNotIn({"state": "closed"}, payloads)
         self.assertFalse(any("仓库已配置" in payload.get("body", "") for payload in payloads))
 

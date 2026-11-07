@@ -1,12 +1,18 @@
 """Prepare course repositories and publish their formal names after verified CI."""
 
+import hmac
+import os
+import re
 import time
+from urllib.parse import urlencode
 from github_api import GitHubError, REQUEST_BUDGET, REQUEST_TIMEOUT, api
 
 ORGANIZATION = "LearningOS"
 CONFIGURATION_TIMEOUT = 600
 POLL_INTERVAL = 10
 VISIBILITY_DELAYS = (0, 2, 4, 8, 16, 32)
+OWNER_PROPERTY = "opencamp_2026a_student_id"
+HUB = "LearningOS/2026a-enroll"
 
 
 class ConfigurationError(RuntimeError):
@@ -69,7 +75,15 @@ def validate_source(repo, template):
                          " already exists with a different source; left untouched.")
 
 
-def prepare_repository(repository, template, course, login, course_id):
+def preparation_description(repository, applicant_id):
+    # Authenticate interrupted creates before the org-only ID property exists.
+    # Never trust a repository's public description as a claim on its own.
+    message = f"2026a-enroll:{repository.lower()}:{applicant_id}".encode()
+    signature = hmac.digest(os.environ["GH_TOKEN"].encode(), message, "sha256").hex()
+    return f"OpenCamp 2026a preparation for GitHub user {applicant_id} ({signature})"
+
+
+def prepare_repository(repository, template, course, login, applicant_id):
     endpoint = "repos/" + repository
     repo = api("GET", endpoint, missing_ok=True)
     if repo is not None:
@@ -80,7 +94,7 @@ def prepare_repository(repository, template, course, login, course_id):
             repo = api("POST", "repos/" + template + "/generate", {
                 "owner": ORGANIZATION, "name": repository.split("/", 1)[1],
                 "private": False, "include_all_branches": True,
-                "description": f"{course['title']} - {login}",
+                "description": preparation_description(repository, applicant_id),
             })
         except GitHubError as error:
             if not error.temporary and error.status != 422:
@@ -230,7 +244,69 @@ def ensure_access(repository_id, student):
     return verify_access(endpoint, student)
 
 
-def provision(login, course_id, course, applicant_id):
+def legacy_receipt(repo, student, issue_number):
+    """A hub bot receipt must link to a configuration run on this exact repository ID."""
+    repo_url = "https://github.com/" + repo["full_name"]
+    run_link = re.compile(r"\[本次配置检查已通过\]\(" + re.escape(repo_url) + r"/actions/runs/(\d+)\)", re.I)
+    def matches(issue):
+        if issue.get("pull_request") or issue["user"]["id"] != student["id"]:
+            return False
+        for comment in pages(f"repos/{HUB}/issues/{issue['number']}/comments"):
+            if comment["user"]["id"] != 41898282 or comment["user"]["login"] != "github-actions[bot]":
+                continue
+            match = run_link.search(comment["body"])
+            if match:
+                run = api("GET", f"repositories/{repo['id']}/actions/runs/{match[1]}", missing_ok=True)
+                if (run and run["repository"]["id"] == repo["id"] and run["event"] == "workflow_dispatch"
+                        and run["path"] == ".github/workflows/check-config.yml" and run["conclusion"] == "success"):
+                    return True
+        return False
+    if issue_number and matches(api("GET", f"repos/{HUB}/issues/{issue_number}")):
+        return True
+    query = urlencode({"q": f"repo:{HUB} is:issue author:{student['login']}"})
+    for issue in pages("search/issues?" + query, key="items"):
+        if issue["number"] != issue_number and matches(issue):
+            return True
+    return False
+
+
+def pages(path, key=None):
+    separator = "&" if "?" in path else "?"
+    page = 1
+    while True:
+        result = api("GET", f"{path}{separator}per_page=100&page={page}")
+        items = result[key] if key else result
+        yield from items
+        if len(items) < 100:
+            return
+        page += 1
+
+
+def verify_branches(repo, course):
+    branches = {b["name"] for b in pages("repos/" + repo["full_name"] + "/branches")}
+    missing = sorted(set(course["branches"]) - branches)
+    if missing:
+        raise ValueError(f"{repo['full_name']}: missing required branches {missing}.")
+
+
+def bind_owner(repo, student, preparing, issue_number):
+    path = f"repositories/{repo['id']}/properties/values"
+    def recorded_id():
+        return next((p["value"] for p in api("GET", path) if p["property_name"] == OWNER_PROPERTY), None)
+    expected = str(student["id"])
+    bound = recorded_id()
+    if bound is None:
+        # The generator sets this description before any student has access.
+        marked = preparing and repo.get("description") == preparation_description(repo["full_name"], student["id"])
+        if not marked and not legacy_receipt(repo, student, issue_number):
+            raise ValueError("Cannot verify this legacy repository against the original applicant's GitHub ID.")
+        api("PATCH", path, {"properties": [{"property_name": OWNER_PROPERTY, "value": expected}]})
+        bound = recorded_id()
+    if bound != expected:
+        raise ValueError("Repository belongs to another GitHub user ID or the binding is not yet visible.")
+
+
+def provision(login, course_id, course, applicant_id, issue_number=None, check_active=None):
     # Finish all checks that do not need a repository before creating one.
     student = api("GET", "users/" + login)
     if (student["type"] != "User" or student["login"].lower() != login.lower()
@@ -251,15 +327,17 @@ def provision(login, course_id, course, applicant_id):
     repo = api("GET", "repos/" + final_repository, missing_ok=True)
     if repo is None:
         repository = ORGANIZATION + "/preparing-" + course["template"] + "-" + login
-        repo = prepare_repository(repository, template, course, login, course_id)
+        repo = prepare_repository(repository, template, course, login, applicant_id)
     else:
         validate_source(repo, template)
         if repo["full_name"].lower() != final_repository.lower():
             raise ValueError("The final name redirects to another repository; left untouched.")
         repository = final_repository
+        verify_branches(repo, course)
         print("Checking existing course repository; student code is preserved: " + repository)
     endpoint = "repos/" + repository
 
+    bind_owner(repo, student, repository != final_repository, issue_number)
     variable_path = endpoint + "/actions/variables/STUDENT_GITHUB"
     variable = api("GET", variable_path, missing_ok=True)
     if variable is None:
@@ -282,6 +360,8 @@ def provision(login, course_id, course, applicant_id):
     wait_for_visibility("PUT", endpoint + "/actions/workflows/check-config.yml/enable")
     check_url = check_configuration(repository)
     wait_for_visibility("PUT", endpoint + "/actions/workflows/build.yml/enable")
+    if check_active:
+        check_active()
     ensure_access(repo["id"], student)
     if repository != final_repository:
         publish_repository(repository, final_repository, repo["id"])
@@ -290,6 +370,7 @@ def provision(login, course_id, course, applicant_id):
     formal = api("GET", "repos/" + final_repository)
     if formal["id"] != repo["id"] or formal["full_name"].lower() != final_repository.lower():
         raise ValueError("The formal name no longer identifies the verified repository.")
+    verify_branches(formal, course)
     access = verify_access(f"repositories/{repo['id']}", student)
     return "https://github.com/" + final_repository, check_url, access
 

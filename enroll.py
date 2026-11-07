@@ -19,6 +19,10 @@ class EnrollmentClosed(ValueError):
     """A recognized course is not accepting new assignment repositories."""
 
 
+class Withdrawn(Exception):
+    """The applicant closed an automatic request while it was queued or running."""
+
+
 def parse_request(issue):
     if issue.get("pull_request") is not None:
         raise ValueError("Pull requests are not enrollment applications.")
@@ -51,27 +55,37 @@ def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     event_name = os.environ["GITHUB_EVENT_NAME"]
     if event_name == "issues" and event.get("action") == "opened":
-        issue = event["issue"]
+        number = event["issue"]["number"]
     elif event_name == "workflow_dispatch":
         number = os.environ.get("RETRY_ISSUE_NUMBER", "")
         if not re.fullmatch(r"[1-9][0-9]*", number):
             raise ValueError("Enter the numeric application issue number.")
-        issue = api("GET", f"repos/{HUB}/issues/{number}", issue=True)
     else:
         raise ValueError("Only new applications or maintainer retries are supported.")
 
     run_url = f"https://github.com/{HUB}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
-    process_application(issue, run_url)
+    path = f"repos/{HUB}/issues/{number}"
+    issue = api("GET", path, issue=True)
+    automatic = event_name == "issues"
+    if automatic and issue["state"] != "open":
+        print(f"Skipping closed application #{number}.")
+        return
+    def check_active():
+        if api("GET", path, issue=True)["state"] != "open":
+            raise Withdrawn()
+    process_application(issue, run_url, check_active if automatic else None)
 
 
-def process_application(issue, run_url):
+def process_application(issue, run_url, check_active=None):
     number = issue["number"]
     url = check_url = None
     try:
         login, course_id, course = parse_request(issue)
         if not os.environ.get("GH_TOKEN"):
             raise ValueError("领取入口尚未配置 ENROLL_GITHUB_TOKEN，请维护者完成一次性建仓授权。")
-        url, check_url, access = provision(login, course_id, course, issue["user"]["id"])
+        url, check_url, access = provision(login, course_id, course, issue["user"]["id"], number, check_active)
+        if check_active:
+            check_active()
         access_step = ("已确认你的账号有写入权限，可以直接进入仓库。" if access == "write" else
                        f"已确认有一份发给你本人的有效写入邀请，请先[接受仓库邀请]({url}/invitations)。")
         body = (
@@ -91,6 +105,9 @@ def process_application(issue, run_url):
         except GitHubError as error:
             if error.status != 422 or api("GET", path, issue=True)["state"] != "closed":
                 raise
+    except Withdrawn:
+        print(f"Application #{number} was closed during enrollment.")
+        return
     except EnrollmentClosed as error:
         body = (str(error) + "\n\n目前仅开放[导学阶段-Rust 语言基础作业领取]"
                 f"(https://github.com/{HUB}/issues/new?template=rustlings.yml)。")
@@ -109,9 +126,12 @@ def process_application(issue, run_url):
         if isinstance(error, ConfigurationError):
             message += f"\n\n领取器未能确认[本次配置检查]({error.url})通过。"
         try:
-            if url is None:
-                api("PATCH", f"repos/{HUB}/issues/{number}", {"state": "open"}, issue=True)
+            if check_active:
+                check_active()
             api("POST", f"repos/{HUB}/issues/{number}/comments", {"body": message}, issue=True)
+        except Withdrawn:
+            print(f"Application #{number} was closed during enrollment.")
+            return
         except (ValueError, RuntimeError, OSError) as notification_error:
             print("Could not report failure to the issue: " + redact(str(notification_error)), flush=True)
         raise
