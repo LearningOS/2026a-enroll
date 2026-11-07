@@ -1,0 +1,36 @@
+name: 维护者领取作业仓库
+on:
+  workflow_dispatch:
+    inputs:
+      course:
+        description: 课程 ID
+        required: true
+        type: string
+      student_id:
+        description: 学员 GitHub 数字账号 ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: course-enrollment
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  enroll:
+    if: github.repository == 'LearningOS/2026a-enroll' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify owner and enroll student
+        env:
+          GH_TOKEN: ${{ secrets.ENROLL_GITHUB_TOKEN }}
+          COURSE_ID: ${{ inputs.course }}
+          STUDENT_ID: ${{ inputs.student_id }}
+        run: python3 -u manual_enroll.py

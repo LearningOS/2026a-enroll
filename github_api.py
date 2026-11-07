@@ -7,6 +7,7 @@ import os
 import subprocess
 import time
 
+VISIBILITY_DELAYS = (0, 2, 4, 8, 16, 32)
 MAX_ATTEMPTS = 4
 REQUEST_TIMEOUT = 30
 REQUEST_BUDGET = 180
@@ -132,3 +133,15 @@ def api(method, path, data=None, missing_ok=False, issue=False, retry=None):
         print(f"Retry {attempt}/{MAX_ATTEMPTS - 1} in {delay}s: {method} {path}", flush=True)
         time.sleep(delay)
     raise AssertionError("Unreachable retry state")
+
+
+def pages(path, key=None):
+    separator = "&" if "?" in path else "?"
+    page = 1
+    while True:
+        result = api("GET", f"{path}{separator}per_page=100&page={page}")
+        items = result[key] if key else result
+        yield from items
+        if len(items) < 100:
+            return
+        page += 1

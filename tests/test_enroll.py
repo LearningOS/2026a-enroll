@@ -3,7 +3,10 @@ import json
 import unittest
 from unittest.mock import patch
 
+import access
 import enroll
+import github_api as github
+import ownership
 import provision as core
 
 
@@ -72,7 +75,7 @@ class ProvisionServer:
             if method == "PATCH":
                 self.owner_id = data["properties"][0]["value"]
                 return
-            return [{"property_name": core.OWNER_PROPERTY, "value": self.owner_id}]
+            return [{"property_name": ownership.OWNER_PROPERTY, "value": self.owner_id}]
         if path == "repositories/123/collaborators/Student-123/permission":
             return {"user": self.invitee, "permission": "write" if self.can_write else "read"}
         if path.startswith("repositories/123/invitations?"):
@@ -112,7 +115,7 @@ class EnrollmentTests(unittest.TestCase):
                 if path.startswith("search/issues?"):
                     return {"items": []}
                 return server(method, path, data, **options)
-            with self.subTest(owner=owner), patch.object(core, "api", side_effect=request):
+            with self.subTest(owner=owner), patch.object(github, "api", side_effect=request):
                 with self.assertRaisesRegex(ValueError, "GitHub.*ID"):
                     server.enroll()
             self.assertTrue(all(method == "GET" for method, _, _ in server.calls))
@@ -133,8 +136,8 @@ class EnrollmentTests(unittest.TestCase):
                             "path": ".github/workflows/check-config.yml", "conclusion": "success"}
                 self.assertTrue(path.startswith("search/issues?"))
                 return {"items": []}
-            with self.subTest(author=author, bot=bot, rid=rid), patch.object(core, "api", side_effect=request):
-                self.assertEqual(core.legacy_receipt(repo, student, 4), expected)
+            with self.subTest(author=author, bot=bot, rid=rid), patch.object(github, "api", side_effect=request):
+                self.assertEqual(ownership.legacy_receipt(repo, student, 4), expected)
 
     def test_formal_repository_missing_required_branch_is_not_certified(self):
         server = ProvisionServer()
@@ -144,7 +147,7 @@ class EnrollmentTests(unittest.TestCase):
             if path.startswith("repos/" + server.final + "/branches?"):
                 return [{"name": "main"}]
             return server(method, path, data, **options)
-        with patch.object(core, "api", side_effect=request), self.assertRaisesRegex(ValueError, "missing.*ch8"):
+        with patch.object(github, "api", side_effect=request), self.assertRaisesRegex(ValueError, "missing.*ch8"):
             server.enroll()
         self.assertTrue(all(method == "GET" for method, _, _ in server.calls))
 
@@ -152,7 +155,7 @@ class EnrollmentTests(unittest.TestCase):
         server = ProvisionServer()
         def withdrawn():
             raise enroll.Withdrawn()
-        with patch.object(core, "api", side_effect=server), patch.object(core, "check_configuration",
+        with patch.object(github, "api", side_effect=server), patch.object(core, "check_configuration",
                 side_effect=server.check), self.assertRaises(enroll.Withdrawn):
             core.provision("Student-123", "2073", enroll.COURSES["2073"], 456, 1, withdrawn)
         self.assertFalse(server.published)
@@ -184,7 +187,7 @@ class EnrollmentTests(unittest.TestCase):
                 writes.append(path)
                 raise core.GitHubError("HTTP 429: wait 3600 seconds", 429, True, 3600)
             return server(method, path, data, **options)
-        with patch.object(core, "api", side_effect=limited), patch.object(core.time, "sleep") as sleep:
+        with patch.object(github, "api", side_effect=limited), patch.object(core.time, "sleep") as sleep:
             with self.assertRaisesRegex(RuntimeError, "no early retry"):
                 core.publish_repository(server.preparing, server.final, 123)
         self.assertEqual(len(writes), 1)
@@ -265,7 +268,7 @@ class EnrollmentTests(unittest.TestCase):
 
     def test_new_repository_is_published_only_after_configuration_passes(self):
         server = ProvisionServer()
-        with patch.object(core, "api", side_effect=server), patch.object(
+        with patch.object(github, "api", side_effect=server), patch.object(
                 core, "check_configuration", side_effect=server.check):
             url, check_url, access = server.enroll()
         self.assertEqual(access, "pending")
@@ -283,7 +286,7 @@ class EnrollmentTests(unittest.TestCase):
 
     def test_failed_configuration_does_not_publish_or_invite(self):
         server = ProvisionServer()
-        with patch.object(core, "api", side_effect=server), patch.object(
+        with patch.object(github, "api", side_effect=server), patch.object(
                 core, "check_configuration", side_effect=core.ConfigurationError("Failed", "https://github.com/check")):
             with self.assertRaises(core.ConfigurationError):
                 server.enroll()
@@ -293,7 +296,7 @@ class EnrollmentTests(unittest.TestCase):
     def test_bad_secret_preflight_creates_no_repository(self):
         server = ProvisionServer()
         server.visibility = "private"
-        with patch.object(core, "api", side_effect=server):
+        with patch.object(github, "api", side_effect=server):
             with self.assertRaisesRegex(ValueError, "public repositories"):
                 server.enroll()
         self.assertFalse(server.created)
@@ -302,7 +305,7 @@ class EnrollmentTests(unittest.TestCase):
     def test_selected_course_secret_is_granted_before_configuration_check(self):
         server = ProvisionServer()
         server.visibility = "selected"
-        with patch.object(core, "api", side_effect=server), patch.object(
+        with patch.object(github, "api", side_effect=server), patch.object(
                 core, "check_configuration", side_effect=server.check):
             server.enroll()
         grants = [(index, method, path) for index, (method, path, _) in enumerate(server.calls)
@@ -320,7 +323,7 @@ class EnrollmentTests(unittest.TestCase):
             if "/actions/secrets/" in path and method == "PUT":
                 raise core.GitHubError("Secret grant denied", 403)
             return server(method, path, data, **options)
-        with patch.object(core, "api", side_effect=denied), patch.object(core, "check_configuration") as check:
+        with patch.object(github, "api", side_effect=denied), patch.object(core, "check_configuration") as check:
             with self.assertRaisesRegex(core.GitHubError, "Secret grant denied"):
                 server.enroll()
         check.assert_not_called()
@@ -330,7 +333,7 @@ class EnrollmentTests(unittest.TestCase):
     def test_lost_creation_and_rename_responses_recover_same_repository(self):
         server = ProvisionServer()
         server.lose_create = server.lose_rename = True
-        with patch.object(core, "api", side_effect=server), patch.object(
+        with patch.object(github, "api", side_effect=server), patch.object(
                 core, "check_configuration", side_effect=server.check):
             url, _, _ = server.enroll()
         self.assertEqual(url, "https://github.com/" + server.final)
@@ -343,13 +346,13 @@ class EnrollmentTests(unittest.TestCase):
         server = ProvisionServer()
         server.created = server.published = True
         server.owner_id = "456"
-        with patch.object(core, "api", side_effect=server), patch.object(
+        with patch.object(github, "api", side_effect=server), patch.object(
                 core, "check_configuration", side_effect=server.check):
             server.enroll()
         self.assertFalse(any(method == "PATCH" or path.endswith("/generate") for method, path, _ in server.calls))
 
     def test_conflicting_final_name_is_never_overwritten(self):
-        with patch.object(core, "api", return_value={"id": 999}) as api:
+        with patch.object(github, "api", return_value={"id": 999}) as api:
             with self.assertRaisesRegex(ValueError, "occupied"):
                 core.publish_repository("org/preparing-student", "org/student", 123)
         self.assertEqual(api.call_count, 1)
@@ -357,7 +360,7 @@ class EnrollmentTests(unittest.TestCase):
     def test_lost_variable_response_does_not_overwrite_other_identity(self):
         server = ProvisionServer()
         server.lose_variable = True
-        with patch.object(core, "api", side_effect=server), patch.object(core, "check_configuration") as check:
+        with patch.object(github, "api", side_effect=server), patch.object(core, "check_configuration") as check:
             with self.assertRaisesRegex(ValueError, "another student"):
                 server.enroll()
         check.assert_not_called()
@@ -377,7 +380,7 @@ class EnrollmentTests(unittest.TestCase):
             self.assertTrue(path.endswith("/actions/runs/123/attempts/1"))
             return responses.pop(0)
 
-        with patch.object(core, "api", side_effect=fake_api), patch.object(core.time, "sleep"):
+        with patch.object(github, "api", side_effect=fake_api), patch.object(core.time, "sleep"):
             url = core.check_configuration("org/student")
         self.assertEqual(url, "https://github.com/org/student/actions/runs/123")
         self.assertEqual(len(calls), 5)
@@ -387,12 +390,12 @@ class EnrollmentTests(unittest.TestCase):
                  ({"status": "completed", "conclusion": "success"},
                   {"jobs": [{"name": "configuration", "conclusion": "skipped"}]})]
         for run, jobs in cases:
-            with patch.object(core, "api", side_effect=[{"workflow_run_id": 123}, run, jobs]):
+            with patch.object(github, "api", side_effect=[{"workflow_run_id": 123}, run, jobs]):
                 with self.assertRaises(core.ConfigurationError):
                     core.check_configuration("org/student")
 
     def test_configuration_timeout_remains_an_error(self):
-        with patch.object(core, "api", side_effect=[{"workflow_run_id": 123}, {"status": "queued"}]), \
+        with patch.object(github, "api", side_effect=[{"workflow_run_id": 123}, {"status": "queued"}]), \
                 patch.object(core.time, "monotonic", side_effect=[0, 0, 601]), \
                 patch.object(core.time, "sleep"):
             with self.assertRaisesRegex(core.ConfigurationError, "10 minutes"):
@@ -429,7 +432,7 @@ class EnrollmentTests(unittest.TestCase):
         server = ProvisionServer()
         server.created = server.published = True
         server.template = "someone/else"
-        with patch.object(core, "api", side_effect=server):
+        with patch.object(github, "api", side_effect=server):
             with self.assertRaisesRegex(ValueError, "left untouched"):
                 server.enroll()
         self.assertTrue(all(method == "GET" for method, _, _ in server.calls))
@@ -443,13 +446,13 @@ class EnrollmentTests(unittest.TestCase):
                     if path.endswith(step) and (method == "PUT" or not options.get("missing_ok")):
                         raise core.GitHubError("Not Found", 404)
                     return server(method, path, data, **options)
-                with patch.object(core, "api", side_effect=outage), patch.object(core.time, "sleep"):
+                with patch.object(github, "api", side_effect=outage), patch.object(core.time, "sleep"):
                     with self.assertRaisesRegex(core.GitHubError, "Not Found"):
                         server.enroll()
                 self.assertTrue(server.created)
                 self.assertFalse(server.published)
                 self.assertEqual(server.variable, {"value": "Student-123"})
-                with patch.object(core, "api", side_effect=server), patch.object(
+                with patch.object(github, "api", side_effect=server), patch.object(
                         core, "check_configuration", side_effect=server.check):
                     self.assertEqual(server.enroll()[2], "pending")
                 self.assertTrue(server.published)
@@ -466,7 +469,7 @@ class EnrollmentTests(unittest.TestCase):
                 failures[method] -= 1
                 raise core.GitHubError("Not Found", 404)
             return server(method, path, data, **options)
-        with patch.object(core, "api", side_effect=not_visible), patch.object(core.time, "sleep"), \
+        with patch.object(github, "api", side_effect=not_visible), patch.object(core.time, "sleep"), \
                 patch.object(core, "check_configuration", side_effect=server.check):
             self.assertEqual(server.enroll()[2], "pending")
         self.assertEqual(failures, {"GET": 0, "PUT": 0})
@@ -477,12 +480,12 @@ class EnrollmentTests(unittest.TestCase):
             if path.startswith("repos/" + server.preparing + "/branches?"):
                 return [{"name": "main"}]
             return server(method, path, data, **options)
-        with patch.object(core, "api", side_effect=incomplete), patch.object(core.time, "sleep"):
+        with patch.object(github, "api", side_effect=incomplete), patch.object(core.time, "sleep"):
             with self.assertRaisesRegex(ValueError, "missing branches.*ch3"):
                 server.enroll()
         self.assertFalse(server.published)
         self.assertIsNone(server.variable)
-        with patch.object(core, "api", side_effect=server), patch.object(
+        with patch.object(github, "api", side_effect=server), patch.object(
                 core, "check_configuration", side_effect=server.check):
             self.assertEqual(server.enroll()[2], "pending")
         self.assertEqual(sum(path.endswith("/generate") for _, path, _ in server.calls), 1)
@@ -490,7 +493,7 @@ class EnrollmentTests(unittest.TestCase):
     def test_issue_1068_waits_for_the_same_attempt_without_redispatch(self):
         run = {"status": "completed", "conclusion": "success"}
         job = {"name": "configuration", "conclusion": "success"}
-        with patch.object(core, "api", side_effect=[{"workflow_run_id": 123}, run, None,
+        with patch.object(github, "api", side_effect=[{"workflow_run_id": 123}, run, None,
                           run, {"jobs": []}, run, {"jobs": [job]}]) as api, patch.object(core.time, "sleep"):
             core.check_configuration("org/student")
         self.assertEqual([c.args[0] for c in api.call_args_list].count("POST"), 1)
@@ -503,16 +506,16 @@ class EnrollmentTests(unittest.TestCase):
             server = ProvisionServer()
             server.can_write = state == "write"
             server.invites = [server.invitation(7)]
-            with self.subTest(state=state), patch.object(core, "api", side_effect=server):
-                self.assertEqual(core.ensure_access(123, server.invitee), state)
+            with self.subTest(state=state), patch.object(github, "api", side_effect=server):
+                self.assertEqual(access.ensure_access(123, server.invitee), state)
                 self.assertTrue(all(method == "GET" for method, _, _ in server.calls))
 
     def test_only_the_applicants_expired_invitation_is_replaced(self):
         server = ProvisionServer()
         others = [server.invitation(i, student_id=1000+i, expired=True) for i in range(100)]
         server.invites = others + [server.invitation(101, expired=True)]
-        with patch.object(core, "api", side_effect=server):
-            self.assertEqual(core.ensure_access(123, server.invitee), "pending")
+        with patch.object(github, "api", side_effect=server):
+            self.assertEqual(access.ensure_access(123, server.invitee), "pending")
         self.assertEqual([c[:2] for c in server.calls if c[0] != "GET"],
                          [("DELETE", "repositories/123/invitations/101"),
                           ("PUT", "repositories/123/collaborators/Student-123")])
@@ -527,8 +530,8 @@ class EnrollmentTests(unittest.TestCase):
                     server.can_write = accepted
                     raise core.GitHubError("response lost", temporary=True)
                 return value
-            with self.subTest(accepted=accepted), patch.object(core, "api", side_effect=lost):
-                self.assertEqual(core.ensure_access(123, server.invitee), "write" if accepted else "pending")
+            with self.subTest(accepted=accepted), patch.object(github, "api", side_effect=lost):
+                self.assertEqual(access.ensure_access(123, server.invitee), "write" if accepted else "pending")
             self.assertEqual(sum(method == "PUT" for method, _, _ in server.calls), 1)
 
     def test_unverifiable_invite_does_not_publish(self):
@@ -537,7 +540,7 @@ class EnrollmentTests(unittest.TestCase):
             if method == "PUT" and "/collaborators/" in path:
                 return None
             return server(method, path, data, **options)
-        with patch.object(core, "api", side_effect=no_effect), patch.object(core.time, "sleep"), \
+        with patch.object(github, "api", side_effect=no_effect), patch.object(core.time, "sleep"), \
                 patch.object(core, "check_configuration", side_effect=server.check):
             with self.assertRaisesRegex(RuntimeError, "Could not verify write access"):
                 server.enroll()
@@ -545,15 +548,15 @@ class EnrollmentTests(unittest.TestCase):
 
     def test_reassigned_login_and_wrong_repository_invites_are_not_modified(self):
         server = ProvisionServer()
-        with patch.object(core, "api", side_effect=server), self.assertRaisesRegex(ValueError, "expected personal"):
+        with patch.object(github, "api", side_effect=server), self.assertRaisesRegex(ValueError, "expected personal"):
             core.provision("Student-123", "2073", enroll.COURSES["2073"], 222)
         other_repo = dict(server.invitation(33, expired=True), repository={"id": 888})
         speaker = dict(server.invitee, id=222)
-        with patch.object(core, "api", side_effect=server), self.assertRaisesRegex(ValueError, "different user"):
-            core.ensure_access(123, speaker)
+        with patch.object(github, "api", side_effect=server), self.assertRaisesRegex(ValueError, "different user"):
+            access.ensure_access(123, speaker)
         server.invites = [other_repo]
-        with patch.object(core, "api", side_effect=server), self.assertRaisesRegex(ValueError, "another repository"):
-            core.ensure_access(123, server.invitee)
+        with patch.object(github, "api", side_effect=server), self.assertRaisesRegex(ValueError, "another repository"):
+            access.ensure_access(123, server.invitee)
         self.assertTrue(all(method == "GET" for method, _, _ in server.calls))
 
     def test_concurrent_issue_close_is_not_reopened(self):
