@@ -7,7 +7,7 @@ import provision as core
 
 
 def application(body=None):
-    return {"number": 1, "user": {"login": "Student-123", "type": "User"},
+    return {"number": 1, "user": {"login": "Student-123", "type": "User", "id": 456},
             "body": body or "### 课程\n\n导学阶段-Rust 语言基础\n"}
 
 
@@ -20,6 +20,9 @@ class ProvisionServer:
         self.created = self.published = False
         self.lose_create = self.lose_rename = self.lose_variable = False
         self.variable = None
+        self.can_write = False
+        self.invites = []
+        self.invitee = {"id": 456, "login": "Student-123", "type": "User"}
         self.visibility = "all"
         self.calls = []
         self.check_position = None
@@ -31,7 +34,7 @@ class ProvisionServer:
     def __call__(self, method, path, data=None, **options):
         self.calls.append((method, path, data))
         if path == "users/Student-123":
-            return {"type": "User", "login": "Student-123"}
+            return self.invitee
         if path == "repos/LearningOS/2026a-rcore":
             return {"is_template": True, "private": False}
         if "/actions/secrets/" in path:
@@ -44,6 +47,8 @@ class ProvisionServer:
                 raise core.GitHubError("Created but response lost; retry got HTTP 422", 422)
             return {"id": 123}
         if path.endswith("/variables/STUDENT_GITHUB"):
+            if self.variable is None and not options.get("missing_ok"):
+                raise core.GitHubError("Not Found", 404)
             return self.variable
         if path.endswith("/variables") and method == "POST":
             self.variable = {"value": "Someone-Else" if self.lose_variable else data["value"]}
@@ -57,8 +62,29 @@ class ProvisionServer:
             return {"id": 123}
         if path in ["repos/" + self.final, "repos/" + self.preparing]:
             exists = self.published if path.endswith(self.final) else self.created
-            return {"id": 123, "template_repository": {"full_name": self.template}, "private": False} if exists else None
-        return None
+            return {"id": 123, "full_name": path[6:], "template_repository": {"full_name": self.template},
+                    "private": False} if exists else None
+        if path == "repositories/123/collaborators/Student-123/permission":
+            return {"user": self.invitee, "permission": "write" if self.can_write else "read"}
+        if path.startswith("repositories/123/invitations?"):
+            page = int(path.split("page=")[-1])
+            return self.invites[(page-1)*100:page*100]
+        if path.startswith("repositories/123/invitations/") and method == "DELETE":
+            self.invites = [i for i in self.invites if i["id"] != int(path.split("/")[-1])]
+            return None
+        if path == "repositories/123/collaborators/Student-123" and method == "PUT":
+            self.invites.append(self.invitation(42))
+            return None
+        if method == "PUT" and path.endswith("/enable"):
+            return None
+        raise AssertionError(f"Unexpected {method} {path}")
+
+    def invitation(self, invite_id, student_id=456, expired=False):
+        return {"id": invite_id, "invitee": {"id": student_id}, "repository": {"id": 123},
+                "permissions": "write", "expired": expired}
+
+    def enroll(self):
+        return core.provision("Student-123", "2073", enroll.COURSES["2073"], self.invitee["id"])
 
 
 class EnrollmentTests(unittest.TestCase):
@@ -89,7 +115,7 @@ class EnrollmentTests(unittest.TestCase):
             if len(calls) == 1:
                 raise RuntimeError("Comment response lost")
         with patch.dict(os.environ, {"GH_TOKEN": "test-only"}), \
-                patch.object(enroll, "provision", return_value=("https://github.com/ready", "https://github.com/check")), \
+                patch.object(enroll, "provision", return_value=("https://github.com/ready", "https://github.com/check", "pending")), \
                 patch.object(enroll, "api", side_effect=notify):
             with self.assertRaisesRegex(RuntimeError, "Comment response lost"):
                 enroll.process_application(application(), "https://github.com/run")
@@ -154,7 +180,8 @@ class EnrollmentTests(unittest.TestCase):
         server = ProvisionServer()
         with patch.object(core, "api", side_effect=server), patch.object(
                 core, "check_configuration", side_effect=server.check):
-            url, check_url = core.provision("Student-123", "2073", enroll.COURSES["2073"])
+            url, check_url, access = server.enroll()
+        self.assertEqual(access, "pending")
         self.assertEqual(url, "https://github.com/" + server.final)
         self.assertEqual(check_url, url + "/actions/runs/123")
         writes = [(method, path, data) for method, path, data in server.calls if method != "GET"]
@@ -172,7 +199,7 @@ class EnrollmentTests(unittest.TestCase):
         with patch.object(core, "api", side_effect=server), patch.object(
                 core, "check_configuration", side_effect=core.ConfigurationError("Failed", "https://github.com/check")):
             with self.assertRaises(core.ConfigurationError):
-                core.provision("Student-123", "2073", enroll.COURSES["2073"])
+                server.enroll()
         self.assertFalse(server.published)
         self.assertFalse(any("/collaborators/" in path for _, path, _ in server.calls))
 
@@ -181,7 +208,7 @@ class EnrollmentTests(unittest.TestCase):
         server.visibility = "private"
         with patch.object(core, "api", side_effect=server):
             with self.assertRaisesRegex(ValueError, "public repositories"):
-                core.provision("Student-123", "2073", enroll.COURSES["2073"])
+                server.enroll()
         self.assertFalse(server.created)
         self.assertTrue(all(method == "GET" for method, _, _ in server.calls))
 
@@ -190,7 +217,7 @@ class EnrollmentTests(unittest.TestCase):
         server.visibility = "selected"
         with patch.object(core, "api", side_effect=server), patch.object(
                 core, "check_configuration", side_effect=server.check):
-            core.provision("Student-123", "2073", enroll.COURSES["2073"])
+            server.enroll()
         grants = [(index, method, path) for index, (method, path, _) in enumerate(server.calls)
                   if "/actions/secrets/" in path and method == "PUT"]
         self.assertEqual(len(grants), 1)
@@ -208,7 +235,7 @@ class EnrollmentTests(unittest.TestCase):
             return server(method, path, data, **options)
         with patch.object(core, "api", side_effect=denied), patch.object(core, "check_configuration") as check:
             with self.assertRaisesRegex(core.GitHubError, "Secret grant denied"):
-                core.provision("Student-123", "2073", enroll.COURSES["2073"])
+                server.enroll()
         check.assert_not_called()
         self.assertFalse(server.published)
         self.assertFalse(any("/collaborators/" in path for _, path, _ in server.calls))
@@ -218,7 +245,7 @@ class EnrollmentTests(unittest.TestCase):
         server.lose_create = server.lose_rename = True
         with patch.object(core, "api", side_effect=server), patch.object(
                 core, "check_configuration", side_effect=server.check):
-            url, _ = core.provision("Student-123", "2073", enroll.COURSES["2073"])
+            url, _, _ = server.enroll()
         self.assertEqual(url, "https://github.com/" + server.final)
         self.assertTrue(server.published)
         self.assertEqual(sum(path.endswith("/generate") for _, path, _ in server.calls), 1)
@@ -229,7 +256,7 @@ class EnrollmentTests(unittest.TestCase):
         server.created = server.published = True
         with patch.object(core, "api", side_effect=server), patch.object(
                 core, "check_configuration", side_effect=server.check):
-            core.provision("Student-123", "2073", enroll.COURSES["2073"])
+            server.enroll()
         self.assertFalse(any(method == "PATCH" or path.endswith("/generate") for method, path, _ in server.calls))
 
     def test_conflicting_final_name_is_never_overwritten(self):
@@ -243,7 +270,7 @@ class EnrollmentTests(unittest.TestCase):
         server.lose_variable = True
         with patch.object(core, "api", side_effect=server), patch.object(core, "check_configuration") as check:
             with self.assertRaisesRegex(ValueError, "another student"):
-                core.provision("Student-123", "2073", enroll.COURSES["2073"])
+                server.enroll()
         check.assert_not_called()
         self.assertFalse(server.published)
 
@@ -258,7 +285,7 @@ class EnrollmentTests(unittest.TestCase):
                 return {"workflow_run_id": 123}
             if path.endswith("/jobs"):
                 return {"jobs": [{"name": "configuration", "conclusion": "success"}]}
-            self.assertTrue(path.endswith("/actions/runs/123"))
+            self.assertTrue(path.endswith("/actions/runs/123/attempts/1"))
             return responses.pop(0)
 
         with patch.object(core, "api", side_effect=fake_api), patch.object(core.time, "sleep"):
@@ -303,7 +330,7 @@ class EnrollmentTests(unittest.TestCase):
 
     def test_success_comment_and_close_follow_configuration_pass(self):
         with patch.dict(os.environ, {"GH_TOKEN": "test-only"}), \
-                patch.object(enroll, "provision", return_value=("https://github.com/repo", "https://github.com/check")), \
+                patch.object(enroll, "provision", return_value=("https://github.com/repo", "https://github.com/check", "write")), \
                 patch.object(enroll, "api") as api:
             enroll.process_application(application(), "https://github.com/run")
         self.assertIn("本次配置检查已通过", api.call_args_list[0].args[2]["body"])
@@ -315,8 +342,138 @@ class EnrollmentTests(unittest.TestCase):
         server.template = "someone/else"
         with patch.object(core, "api", side_effect=server):
             with self.assertRaisesRegex(ValueError, "left untouched"):
-                core.provision("Student-123", "2073", enroll.COURSES["2073"])
+                server.enroll()
         self.assertTrue(all(method == "GET" for method, _, _ in server.calls))
+
+    def test_resume_the_same_repository_after_interrupted_configuration(self):
+        # #578 and #583: the write took effect, but the subsequent Actions endpoint was not ready.
+        for step in ("variables/STUDENT_GITHUB", "workflows/check-config.yml/enable"):
+            with self.subTest(step=step):
+                server = ProvisionServer()
+                def outage(method, path, data=None, **options):
+                    if path.endswith(step) and (method == "PUT" or not options.get("missing_ok")):
+                        raise core.GitHubError("Not Found", 404)
+                    return server(method, path, data, **options)
+                with patch.object(core, "api", side_effect=outage), patch.object(core.time, "sleep"):
+                    with self.assertRaisesRegex(core.GitHubError, "Not Found"):
+                        server.enroll()
+                self.assertTrue(server.created)
+                self.assertFalse(server.published)
+                self.assertEqual(server.variable, {"value": "Student-123"})
+                with patch.object(core, "api", side_effect=server), patch.object(
+                        core, "check_configuration", side_effect=server.check):
+                    self.assertEqual(server.enroll()[2], "pending")
+                self.assertTrue(server.published)
+                for suffix in ("/generate", "/actions/variables"):
+                    self.assertEqual(sum(method == "POST" and path.endswith(suffix)
+                                         for method, path, _ in server.calls), 1)
+
+    def test_transient_variable_and_workflow_404_recover_in_one_application(self):
+        server = ProvisionServer()
+        failures = {"GET": 2, "PUT": 2}
+        def not_visible(method, path, data=None, **options):
+            if ((path.endswith("STUDENT_GITHUB") and not options.get("missing_ok")
+                 or path.endswith("check-config.yml/enable")) and failures[method]):
+                failures[method] -= 1
+                raise core.GitHubError("Not Found", 404)
+            return server(method, path, data, **options)
+        with patch.object(core, "api", side_effect=not_visible), patch.object(core.time, "sleep"), \
+                patch.object(core, "check_configuration", side_effect=server.check):
+            self.assertEqual(server.enroll()[2], "pending")
+        self.assertEqual(failures, {"GET": 0, "PUT": 0})
+
+    def test_partially_generated_branch_set_is_neither_published_nor_recreated(self):
+        server = ProvisionServer()
+        def incomplete(method, path, data=None, **options):
+            if path.startswith("repos/" + server.preparing + "/branches?"):
+                return [{"name": "main"}]
+            return server(method, path, data, **options)
+        with patch.object(core, "api", side_effect=incomplete), patch.object(core.time, "sleep"):
+            with self.assertRaisesRegex(ValueError, "missing branches.*ch3"):
+                server.enroll()
+        self.assertFalse(server.published)
+        self.assertIsNone(server.variable)
+        with patch.object(core, "api", side_effect=server), patch.object(
+                core, "check_configuration", side_effect=server.check):
+            self.assertEqual(server.enroll()[2], "pending")
+        self.assertEqual(sum(path.endswith("/generate") for _, path, _ in server.calls), 1)
+
+    def test_issue_1068_waits_for_the_same_attempt_without_redispatch(self):
+        run = {"status": "completed", "conclusion": "success"}
+        job = {"name": "configuration", "conclusion": "success"}
+        with patch.object(core, "api", side_effect=[{"workflow_run_id": 123}, run, None,
+                          run, {"jobs": []}, run, {"jobs": [job]}]) as api, patch.object(core.time, "sleep"):
+            core.check_configuration("org/student")
+        self.assertEqual([c.args[0] for c in api.call_args_list].count("POST"), 1)
+        self.assertEqual({c.args[1] for c in api.call_args_list[1:]},
+                         {"repos/org/student/actions/runs/123/attempts/1",
+                          "repos/org/student/actions/runs/123/attempts/1/jobs"})
+
+    def test_existing_write_or_pending_invitation_needs_no_access_write(self):
+        for state in ("write", "pending"):
+            server = ProvisionServer()
+            server.can_write = state == "write"
+            server.invites = [server.invitation(7)]
+            with self.subTest(state=state), patch.object(core, "api", side_effect=server):
+                self.assertEqual(core.ensure_access(123, server.invitee), state)
+                self.assertTrue(all(method == "GET" for method, _, _ in server.calls))
+
+    def test_only_the_applicants_expired_invitation_is_replaced(self):
+        server = ProvisionServer()
+        others = [server.invitation(i, student_id=1000+i, expired=True) for i in range(100)]
+        server.invites = others + [server.invitation(101, expired=True)]
+        with patch.object(core, "api", side_effect=server):
+            self.assertEqual(core.ensure_access(123, server.invitee), "pending")
+        self.assertEqual([c[:2] for c in server.calls if c[0] != "GET"],
+                         [("DELETE", "repositories/123/invitations/101"),
+                          ("PUT", "repositories/123/collaborators/Student-123")])
+        self.assertEqual(server.invites, others + [server.invitation(42)])
+
+    def test_accepted_or_already_sent_after_lost_invite_response(self):
+        for accepted in (True, False):
+            server = ProvisionServer()
+            def lost(method, path, data=None, **options):
+                value = server(method, path, data, **options)
+                if method == "PUT":
+                    server.can_write = accepted
+                    raise core.GitHubError("response lost", temporary=True)
+                return value
+            with self.subTest(accepted=accepted), patch.object(core, "api", side_effect=lost):
+                self.assertEqual(core.ensure_access(123, server.invitee), "write" if accepted else "pending")
+            self.assertEqual(sum(method == "PUT" for method, _, _ in server.calls), 1)
+
+    def test_unverifiable_invite_does_not_publish(self):
+        server = ProvisionServer()
+        def no_effect(method, path, data=None, **options):
+            if method == "PUT" and "/collaborators/" in path:
+                return None
+            return server(method, path, data, **options)
+        with patch.object(core, "api", side_effect=no_effect), patch.object(core.time, "sleep"), \
+                patch.object(core, "check_configuration", side_effect=server.check):
+            with self.assertRaisesRegex(RuntimeError, "Could not verify write access"):
+                server.enroll()
+        self.assertFalse(server.published)
+
+    def test_reassigned_login_and_wrong_repository_invites_are_not_modified(self):
+        server = ProvisionServer()
+        with patch.object(core, "api", side_effect=server), self.assertRaisesRegex(ValueError, "expected personal"):
+            core.provision("Student-123", "2073", enroll.COURSES["2073"], 222)
+        other_repo = dict(server.invitation(33, expired=True), repository={"id": 888})
+        speaker = dict(server.invitee, id=222)
+        with patch.object(core, "api", side_effect=server), self.assertRaisesRegex(ValueError, "different user"):
+            core.ensure_access(123, speaker)
+        server.invites = [other_repo]
+        with patch.object(core, "api", side_effect=server), self.assertRaisesRegex(ValueError, "another repository"):
+            core.ensure_access(123, server.invitee)
+        self.assertTrue(all(method == "GET" for method, _, _ in server.calls))
+
+    def test_concurrent_issue_close_is_not_reopened(self):
+        with patch.dict(os.environ, {"GH_TOKEN": "test-only"}), patch.object(
+                enroll, "provision", return_value=("url", "check", "pending")), patch.object(
+                enroll, "api", side_effect=[{}, core.GitHubError("already closed", 422), {"state": "closed"}]) as api:
+            enroll.process_application(application(), "https://github.com/run")
+        self.assertEqual([c.args[0] for c in api.call_args_list], ["POST", "PATCH", "GET"])
+        self.assertIn("有效写入邀请", api.call_args_list[0].args[2]["body"])
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import sys
 
-from github_api import api, redact
+from github_api import GitHubError, api, redact
 from provision import ConfigurationError, provision
 
 ROOT = Path(__file__).resolve().parent
@@ -71,10 +71,12 @@ def process_application(issue, run_url):
         login, course_id, course = parse_request(issue)
         if not os.environ.get("GH_TOKEN"):
             raise ValueError("领取入口尚未配置 ENROLL_GITHUB_TOKEN，请维护者完成一次性建仓授权。")
-        url, check_url = provision(login, course_id, course)
+        url, check_url, access = provision(login, course_id, course, issue["user"]["id"])
+        access_step = ("已确认你的账号有写入权限，可以直接进入仓库。" if access == "write" else
+                       f"已确认有一份发给你本人的有效写入邀请，请先[接受仓库邀请]({url}/invitations)。")
         body = (
             f"@{login}，你的 **{course['title']}** 作业仓库已配置。\n\n"
-            f"1. [接受仓库邀请]({url}/invitations)（已有访问权限时可直接进入仓库）。\n"
+            f"1. {access_step}\n"
             f"2. [打开作业仓库]({url})，按 README 克隆、完成实验并 push。\n"
             f"3. 在 [Actions]({url}/actions) 查看评测和成绩上传结果。\n\n"
             "请先加入 [OpenCamp 秋冬季训练营](https://opencamp.cn/os2edu/camp/2026fall)，"
@@ -83,7 +85,12 @@ def process_application(issue, run_url):
             "配置检查不会提交成绩，实际成绩由之后的实验 push 触发评测上传。"
         )
         api("POST", f"repos/{HUB}/issues/{number}/comments", {"body": body}, issue=True)
-        api("PATCH", f"repos/{HUB}/issues/{number}", {"state": "closed"}, issue=True)
+        path = f"repos/{HUB}/issues/{number}"
+        try:
+            api("PATCH", path, {"state": "closed"}, issue=True)
+        except GitHubError as error:
+            if error.status != 422 or api("GET", path, issue=True)["state"] != "closed":
+                raise
     except EnrollmentClosed as error:
         body = (str(error) + "\n\n目前仅开放[导学阶段-Rust 语言基础作业领取]"
                 f"(https://github.com/{HUB}/issues/new?template=rustlings.yml)。")
@@ -94,14 +101,16 @@ def process_application(issue, run_url):
         return
     except (ValueError, RuntimeError, OSError, KeyError) as error:
         print(redact(str(error)), flush=True)
-        message = f"本次领取未完成，请维护者查看[运行日志]({run_url})后重试该申请。"
+        message = (f"本次领取未完成。请维护者查看[运行日志]({run_url})，"
+                   f"在领取工作流中重试原申请 #{number}。若准备仓已经生成，会接着配置，无需删仓。")
         if url is not None:
             message = (f"[作业仓库]({url})已准备完成，[配置检查]({check_url})已通过。"
                        f"回复或关闭申请时发生错误，请维护者查看[运行日志]({run_url})后重试。")
         if isinstance(error, ConfigurationError):
-            message += f"\n\n[本次配置检查]({error.url})尚未通过，因此保留申请供排查和重试。"
+            message += f"\n\n领取器未能确认[本次配置检查]({error.url})通过。"
         try:
-            api("PATCH", f"repos/{HUB}/issues/{number}", {"state": "open"}, issue=True)
+            if url is None:
+                api("PATCH", f"repos/{HUB}/issues/{number}", {"state": "open"}, issue=True)
             api("POST", f"repos/{HUB}/issues/{number}/comments", {"body": message}, issue=True)
         except (ValueError, RuntimeError, OSError) as notification_error:
             print("Could not report failure to the issue: " + redact(str(notification_error)), flush=True)
